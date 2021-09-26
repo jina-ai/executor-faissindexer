@@ -1,0 +1,4 @@
+faiss-cpu==1.7.1
+jina
+lmdb==1.2.1
+numpy

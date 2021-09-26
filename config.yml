@@ -1,0 +1,4 @@
+jtype: FaissIndexer
+metas:
+  py_modules:
+    - executor.py

@@ -1,0 +1,4 @@
+manifest_version: 1
+name: FaissIndexer
+description: A similarity search based on Faiss and LMDB
+keywords: faiss lmdb ann
