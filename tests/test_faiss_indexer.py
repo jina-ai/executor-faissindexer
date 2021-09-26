@@ -46,9 +46,10 @@ def test_config():
     assert len(ex._buffer_indexer) == 0
 
 
-def test_index(tmpdir, docs):
+@pytest.mark.parametrize('index_key', ['Flat', 'HNSW'])
+def test_index(tmpdir, docs, index_key):
     metas = {'workspace': str(tmpdir)}
-    indexer1 = FaissIndexer(metas=metas)
+    indexer1 = FaissIndexer(index_key=index_key, metas=metas)
     assert indexer1.num_dim is None
     assert indexer1.total_indexes == 0
     assert indexer1.total_deletes == 0

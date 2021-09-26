@@ -4,7 +4,7 @@ from copy import deepcopy
 from collections import OrderedDict
 from pathlib import Path
 from typing import Optional, Dict, List, Union
-
+import os
 import faiss
 import lmdb
 import numpy as np
@@ -18,11 +18,11 @@ class FaissIndexer(Executor):
         self,
         index_key: str = 'Flat',
         metric: str = 'cosine',
+        trained_index_file: Optional[str] = None,
         *args,
         **kwargs,
     ):
         """
-        :param index_path: index path
         :param index_key: create a new FAISS index of the specified type.
                 The type is determined from the given string following the conventions
                 of the original FAISS index factory.
@@ -37,6 +37,7 @@ class FaissIndexer(Executor):
                     - Overview of indices https://github.com/facebookresearch/faiss/wiki/Faiss-indexes
                     - Guideline for choosing an index https://github.com/facebookresearch/faiss/wiki/Guidelines-to-choose-an-index
                     - FAISS Index factory https://github.com/facebookresearch/faiss/wiki/The-index-factory
+        :param trained_index_file: the index file dumped from a trained index, e.g., ``faiss.index``.
         """
         super().__init__(*args, **kwargs)
         self.logger = logging.getLogger(self.__module__.__class__.__name__)
@@ -72,10 +73,18 @@ class FaissIndexer(Executor):
         # the buffer_indexer is created for incremental updates
         self._buffer_indexer = DocumentArray()
 
-        # the vec_indexer is created for incremental adding
+        # the vec_indexer is created for incremental indexing
         self._vec_indexer = None
-        self._build_indexer(**kwargs)
+        if trained_index_file:
+            if os.path.exists(trained_index_file):
+                self._vec_indexer = faiss.read_index(trained_index_file)
+            else:
+                raise ValueError(
+                    f'The trained index file {trained_index_file} does not exist!'
+                )
+
         self._index_kwargs = kwargs
+        self._build_indexer(**kwargs)
 
     @requests(on='/index')
     def index(self, docs: DocumentArray, parameters: Optional[Dict] = None, **kwargs):
@@ -86,6 +95,8 @@ class FaissIndexer(Executor):
 
         if docs is None:
             return
+
+        sync_index = parameters.get('sync_index', True) if parameters else True
 
         updated_docs = DocumentArray()
 
@@ -106,7 +117,8 @@ class FaissIndexer(Executor):
                     # TODO: use hash to identify fake updates
                     updated_docs.append(doc)
 
-            self._add_vecs_with_ids(embeddings, doc_ids)
+            if sync_index:
+                self._add_vecs_with_ids(embeddings, doc_ids)
 
         self.update(updated_docs, parameters=parameters)
 
@@ -197,6 +209,10 @@ class FaissIndexer(Executor):
                     self.logger.warning(
                         f'Can not delete no-existed Doc ({doc_id}) from {self.__module__.__class__.__name__}'
                     )
+
+    @requests(on='/config')
+    def config(self, parameters: Dict, **kwargs):
+        pass
 
     def get_doc(self, doc_id: str):
         with self._kv_storage_env.begin(write=False) as txn:
@@ -308,9 +324,9 @@ class FaissIndexer(Executor):
             )
             metric_type = faiss.METRIC_INNER_PRODUCT
 
-        if self.metric not in {'inner_product', 'euclidean', 'cosine'}:
+        if self.metric not in {'euclidean', 'cosine'}:
             self.logger.warning(
                 'Invalid distance metric for Faiss index construction. Defaulting '
-                'to l2 distance'
+                'to euclidean distance'
             )
         return metric_type
