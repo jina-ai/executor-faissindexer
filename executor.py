@@ -53,7 +53,7 @@ class FaissIndexer(Executor):
         # the kv_storage is the storage backend for documents
         self._kv_storage_env = lmdb.Environment(
             storage_path,
-            map_size=3.436e10,  # in bytes, 32G,
+            map_size=int(3.436e10),  # in bytes, 32G,
             subdir=False,
             readonly=False,
             metasync=True,
@@ -84,7 +84,7 @@ class FaissIndexer(Executor):
                 )
 
         self._index_kwargs = kwargs
-        self._build_indexer(**kwargs)
+        self._vec_indexer = self._build_indexer(self._vec_indexer, **kwargs)
 
     @requests(on='/index')
     def index(self, docs: DocumentArray, parameters: Optional[Dict] = None, **kwargs):
@@ -118,7 +118,9 @@ class FaissIndexer(Executor):
                     updated_docs.append(doc)
 
             if sync_index:
-                self._add_vecs_with_ids(embeddings, doc_ids)
+                self._vec_indexer = self._add_vecs_with_ids(
+                    self._vec_indexer, embeddings, doc_ids
+                )
 
         self.update(updated_docs, parameters=parameters)
 
@@ -210,9 +212,29 @@ class FaissIndexer(Executor):
                         f'Can not delete no-existed Doc ({doc_id}) from {self.__module__.__class__.__name__}'
                     )
 
-    @requests(on='/config')
+    # WIP: config the indexer on the fly
+    # @requests(on='/config')
     def config(self, parameters: Dict, **kwargs):
-        pass
+        self.index_key = parameters.get('index_key', self.index_key)
+        parameters.pop('index_key')
+        self.metric = parameters.get('metric', self.metric)
+        parameters.pop('metric')
+        num_dim = parameters.get('num_dim', self.num_dim)
+        parameters.pop('num_dim')
+
+        self._index_kwargs = parameters
+
+        buffer = self._init_indexer(
+            num_dim,
+            index_key=self.index_key,
+            metric_type=self.metric_type,
+            **parameters,
+        )
+
+        self._build_indexer(buffer, **parameters)
+
+        self._vec_indexer.reset()
+        self._vec_indexer = buffer
 
     def get_doc(self, doc_id: str):
         with self._kv_storage_env.begin(write=False) as txn:
@@ -241,25 +263,19 @@ class FaissIndexer(Executor):
             indexer = faiss.index_factory(num_dim, index_key, metric_type)
         return indexer
 
-    def _build_indexer(self, **kwargs):
-        with self._kv_storage_env.begin(write=False) as txn:
-            cursor = txn.cursor()
-            cursor.iternext()
-            iterator = cursor.iternext(keys=True, values=True)
+    def _build_indexer(self, indexer, **kwargs):
+        docs_generator = self._docs_generator()
+        for docs in docs_generator:
+            doc_ids = docs.get_attributes('id')
+            embeddings = docs.embeddings
+            N, D = embeddings.shape
+            assert len(doc_ids) == N
 
-            for _id, _data in iterator:
-                doc = Document(_data)
-                embeds = np.asarray(doc.embedding).reshape((1, -1))
-
-                if self._vec_indexer is None:
-                    self._vec_indexer = self._init_indexer(
-                        embeds.shape[1], self.index_key, self.metric_type, **kwargs
-                    )
-
-                self._add_vecs_with_ids(embeds, [doc.id])
+            indexer = self._add_vecs_with_ids(indexer, embeddings, doc_ids)
+        return indexer
 
     def _add_vecs_with_ids(
-        self, embeddings: Union[np.ndarray, List], doc_ids: List[str]
+        self, indexer, embeddings: Union[np.ndarray, List], doc_ids: List[str]
     ):
         num_docs = len(doc_ids)
         assert num_docs == len(embeddings)
@@ -270,23 +286,44 @@ class FaissIndexer(Executor):
         if isinstance(embeddings, list):
             embeddings = np.stack(embeddings)
 
+        if indexer is None:
+            indexer = self._init_indexer(
+                embeddings.shape[1],
+                index_key=self.index_key,
+                metric_type=self.metric_type,
+                **self._index_kwargs,
+            )
+
         if self.metric == 'cosine':
             faiss.normalize_L2(embeddings)
 
-        if self._vec_indexer is None:
-            self._vec_indexer = self._init_indexer(
-                embeddings.shape[1],
-                self.index_key,
-                self.metric_type,
-                **self._index_kwargs,
-            )
         total_indexes = self.total_indexes
         for idx, doc_id in zip(range(total_indexes, total_indexes + num_docs), doc_ids):
             self._metas['doc_ids'].append(doc_id)
             self._metas['delete_marks'].append(0)
             self._metas['doc_id_to_offset'][doc_id] = idx
 
-        self._vec_indexer.add(embeddings)
+        indexer.add(embeddings)
+        return indexer
+
+    def _docs_generator(self, batch_size: int = 1, **kwargs):
+        count = 0
+        docs = DocumentArray()
+        with self._kv_storage_env.begin(write=False) as txn:
+            cursor = txn.cursor()
+            cursor.iternext()
+            iterator = cursor.iternext(keys=True, values=True)
+
+            for _id, _data in iterator:
+                doc = Document(_data)
+                docs.append(doc)
+                count += 1
+                if count % batch_size == 0:
+                    yield docs
+                    docs.clear()
+
+            if len(docs) > 0:
+                yield docs
 
     @property
     def num_dim(self):
