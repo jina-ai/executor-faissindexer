@@ -3,7 +3,7 @@ from copy import deepcopy
 
 from collections import OrderedDict
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Union
 
 import faiss
 import lmdb
@@ -17,7 +17,6 @@ class FaissIndexer(Executor):
     def __init__(
         self,
         index_key: str = 'Flat',
-        num_dim: int = 256,
         metric: str = 'cosine',
         *args,
         **kwargs,
@@ -43,16 +42,16 @@ class FaissIndexer(Executor):
         self.logger = logging.getLogger(self.__module__.__class__.__name__)
 
         self.index_key = index_key
-        self.num_dim = num_dim
         self.metric = metric
 
         workspace = Path(self.workspace)
+        storage_path = str(workspace / 'lmdb_docs')
 
         self._metas = {'doc_ids': [], 'doc_id_to_offset': {}, 'delete_marks': []}
 
         # the kv_storage is the storage backend for documents
-        self._kv_storage = lmdb.Environment(
-            str(workspace),
+        self._kv_storage_env = lmdb.Environment(
+            storage_path,
             map_size=3.436e10,  # in bytes, 32G,
             subdir=False,
             readonly=False,
@@ -74,10 +73,9 @@ class FaissIndexer(Executor):
         self._buffer_indexer = DocumentArray()
 
         # the vec_indexer is created for incremental adding
-        self._vec_indexer = self._create_indexer(
-            self.num_dim, self.index_key, self.metric_type, **kwargs
-        )
-        self._build_indexer()
+        self._vec_indexer = None
+        self._build_indexer(**kwargs)
+        self._index_kwargs = kwargs
 
     @requests(on='/index')
     def index(self, docs: DocumentArray, parameters: Optional[Dict] = None, **kwargs):
@@ -94,29 +92,31 @@ class FaissIndexer(Executor):
         embeddings = []
         doc_ids = []
 
-        with self._storage as env:
-            with env.begin(write=True) as transaction:
-                for doc in docs:
-                    # enforce using float32 as dtype of embeddings
-                    doc.embedding = doc.embedding.astype(np.float32)
-                    added = transaction.put(
-                        doc.id.encode(), doc.SerializeToString(), overwrite=True
-                    )
-                    if added:
-                        embeddings.append(doc.embedding)
-                        doc_ids.append(doc.id)
-                    else:
-                        # TODO: use hash to identify fake updates
-                        updated_docs.append(doc)
+        with self._kv_storage_env.begin(write=True) as txn:
+            for doc in docs:
+                # enforce using float32 as dtype of embeddings
+                doc.embedding = doc.embedding.astype(np.float32)
+                added = txn.put(
+                    doc.id.encode(), doc.SerializeToString(), overwrite=True
+                )
+                if added:
+                    embeddings.append(doc.embedding)
+                    doc_ids.append(doc.id)
+                else:
+                    # TODO: use hash to identify fake updates
+                    updated_docs.append(doc)
 
-                self._add_vecs_with_ids(embeddings, doc_ids)
+            self._add_vecs_with_ids(embeddings, doc_ids)
 
         self.update(updated_docs, parameters=parameters)
 
     @requests(on='/search')
     def search(self, docs: DocumentArray, parameters: Optional[Dict] = None, **kwargs):
-        top_k = int(parameters.get('top_k', 10))
+        top_k = int(parameters.get('top_k', 10)) if parameters else 10
         if (docs is None) or len(docs) == 0:
+            return
+
+        if self._vec_indexer is None:
             return
 
         embeddings = docs.embeddings.astype(np.float32)
@@ -127,6 +127,8 @@ class FaissIndexer(Executor):
         expand_top_k = 2 * top_k + self.total_deletes
 
         dists, ids = self._vec_indexer.search(embeddings, expand_top_k)
+        if self.metric == 'cosine':
+            dists = 1.0 - dists
 
         if len(self._buffer_indexer) > 0:
             match_args = {'limit': top_k, 'metric': self.metric}
@@ -137,6 +139,8 @@ class FaissIndexer(Executor):
             matched_docs = OrderedDict()
             for m_info in zip(*matches):
                 idx, dist = m_info
+                if idx < 0 or self._metas['delete_marks'][idx]:
+                    continue
                 match_doc_id = self._metas['doc_ids'][idx]
                 match = self.get_doc(match_doc_id)
                 match.scores[self.metric] = dist
@@ -150,7 +154,8 @@ class FaissIndexer(Executor):
             docs[doc_idx].matches = [
                 m
                 for _, m in sorted(
-                    matched_docs.items(), key=lambda item: item.scores[self.metric]
+                    matched_docs.items(),
+                    key=lambda item: item[1].scores[self.metric].value,
                 )
             ][:top_k]
 
@@ -164,50 +169,43 @@ class FaissIndexer(Executor):
         if docs is None:
             return
 
-        with self._storage as env:
-            with env.begin(write=True) as transaction:
-                for doc in docs:
-                    value = transaction.replace(
-                        doc.id.encode(), doc.SerializeToString()
-                    )
-                    if not value:
-                        raise ValueError(
-                            f'The Doc ({doc.id}) does not exist in database!'
-                        )
-                    self._buffer_indexer.append(doc)
+        with self._kv_storage_env.begin(write=True) as txn:
+            for doc in docs:
+                value = txn.replace(doc.id.encode(), doc.SerializeToString())
+                if not value:
+                    raise ValueError(f'The Doc ({doc.id}) does not exist in database!')
+                self._buffer_indexer.append(doc)
 
     @requests(on='/delete')
-    def delete(self, docs: DocumentArray, parameters: Optional[Dict] = None, **kwargs):
+    def delete(self, parameters: Dict, **kwargs):
         """Delete entries from the index by id
-        :param docs: the documents to delete
         :param parameters: parameters to the request
         """
-        if docs is None:
-            return
+        deleted_ids = parameters.get('ids', [])
 
-        with self._storage as env:
-            with env.begin(write=True) as transaction:
-                for doc in docs:
-                    deleted = transaction.delete(doc.id.encode())
-                    # delete from buffer_indexer
-                    if deleted:
-                        idx = self._metas['doc_id_to_offset'][doc.id]
-                        self._metas['delete_marks'][idx] = 1
+        with self._kv_storage_env.begin(write=True) as txn:
+            for doc_id in deleted_ids:
+                deleted = txn.delete(doc_id.encode())
+                # delete from buffer_indexer
+                if deleted:
+                    idx = self._metas['doc_id_to_offset'][doc_id]
+                    self._metas['delete_marks'][idx] = 1
 
-                        if doc.id in self._buffer_indexer:
-                            del self._buffer_indexer[doc.id]
-                    else:
-                        self.logger.warning(
-                            f'Can not delete no-existed Doc ({doc.id}) from {self.__module__.__class__.__name__}'
-                        )
+                    if doc_id in self._buffer_indexer:
+                        del self._buffer_indexer[doc_id]
+                else:
+                    self.logger.warning(
+                        f'Can not delete no-existed Doc ({doc_id}) from {self.__module__.__class__.__name__}'
+                    )
 
     def get_doc(self, doc_id: str):
-        with self._storage as env:
-            with env.begin(write=True) as transaction:
-                buffer = transaction.get(doc_id.encode())
+        with self._kv_storage_env.begin(write=False) as txn:
+            buffer = txn.get(doc_id.encode())
+            if buffer:
                 return Document(buffer)
+            return None
 
-    def _create_indexer(
+    def _init_indexer(
         self,
         num_dim: int,
         index_key: str = 'Flat',
@@ -227,20 +225,25 @@ class FaissIndexer(Executor):
             indexer = faiss.index_factory(num_dim, index_key, metric_type)
         return indexer
 
-    def _build_indexer(self):
-        with self._storage as env:
-            with env.begin(write=True) as transaction:
-                cursor = transaction.cursor()
-                cursor.iternext()
-                iterator = cursor.iternext(keys=True, values=True)
+    def _build_indexer(self, **kwargs):
+        with self._kv_storage_env.begin(write=False) as txn:
+            cursor = txn.cursor()
+            cursor.iternext()
+            iterator = cursor.iternext(keys=True, values=True)
 
-                for _id, _data in iterator:
-                    doc = Document(_data)
-                    embeds = np.asarray(doc.embedding).reshape((1, -1))
-                    self._add_vecs_with_ids(embeds, [doc.id])
+            for _id, _data in iterator:
+                doc = Document(_data)
+                embeds = np.asarray(doc.embedding).reshape((1, -1))
+
+                if self._vec_indexer is None:
+                    self._vec_indexer = self._init_indexer(
+                        embeds.shape[1], self.index_key, self.metric_type, **kwargs
+                    )
+
+                self._add_vecs_with_ids(embeds, [doc.id])
 
     def _add_vecs_with_ids(
-        self, embeddings: Optional[np.ndarray, List], doc_ids: List[str]
+        self, embeddings: Union[np.ndarray, List], doc_ids: List[str]
     ):
         num_docs = len(doc_ids)
         assert num_docs == len(embeddings)
@@ -254,24 +257,42 @@ class FaissIndexer(Executor):
         if self.metric == 'cosine':
             faiss.normalize_L2(embeddings)
 
-        self._indexer.add(embeddings)
-        total_docs = self.total_docs
-        for idx, doc_id in zip(range(total_docs, total_docs + num_docs), doc_ids):
+        if self._vec_indexer is None:
+            self._vec_indexer = self._init_indexer(
+                embeddings.shape[1],
+                self.index_key,
+                self.metric_type,
+                **self._index_kwargs,
+            )
+        total_indexes = self.total_indexes
+        for idx, doc_id in zip(range(total_indexes, total_indexes + num_docs), doc_ids):
             self._metas['doc_ids'].append(doc_id)
             self._metas['delete_marks'].append(0)
             self._metas['doc_id_to_offset'][doc_id] = idx
 
+        self._vec_indexer.add(embeddings)
+
     @property
-    def total_docs(self):
-        return self._vec_indexer.ntotal
+    def num_dim(self):
+        if self._vec_indexer:
+            return self._vec_indexer.d
+        return None
+
+    @property
+    def total_indexes(self):
+        return self._vec_indexer.ntotal if self._vec_indexer else 0
 
     @property
     def size(self):
-        return self.total_docs - self.total_deletes
+        return self.total_indexes - self.total_deletes
 
     @property
     def total_deletes(self):
         return sum(self._metas['delete_marks'])
+
+    @property
+    def total_updates(self):
+        return len(self._buffer_indexer)
 
     @property
     def metric_type(self):
@@ -287,7 +308,7 @@ class FaissIndexer(Executor):
             )
             metric_type = faiss.METRIC_INNER_PRODUCT
 
-        if self.metric not in {'inner_product', 'l2', 'cosine'}:
+        if self.metric not in {'inner_product', 'euclidean', 'cosine'}:
             self.logger.warning(
                 'Invalid distance metric for Faiss index construction. Defaulting '
                 'to l2 distance'
