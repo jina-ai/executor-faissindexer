@@ -12,7 +12,11 @@ from jina import Document, Executor, DocumentArray, requests
 
 
 class FaissIndexer(Executor):
-    """A vector similarity indexer based on Faiss and LMDB"""
+    """A vector similarity indexer for very large scale data using Faiss and LMDB.
+
+    The documents are stored using the LMDB, while the vector
+    embeddings are indexed in a FAISS Index.
+    """
 
     def __init__(
         self,
@@ -212,6 +216,23 @@ class FaissIndexer(Executor):
                         f'Can not delete no-existed Doc ({doc_id}) from {self.__module__.__class__.__name__}'
                     )
 
+    @requests(on='/clear')
+    def clear(self, **kwargs):
+        with self._kv_storage_env.begin(write=True) as txn:
+            txn.drop(self._kv_storage_env.open_db(txn=txn), delete=False)
+        if self._vec_indexer:
+            self._vec_indexer.reset()
+        self._metas = {'doc_ids': [], 'doc_id_to_offset': {}, 'delete_marks': []}
+
+    @requests(on='/status')
+    def status(self, **kwargs):
+        with self._kv_storage_env.begin(write=False) as txn:
+            stat = Document(tags={'env_stat': txn.stat()})
+            stat.tags['total_indexes'] = self.total_indexes
+            stat.tags['total_updates'] = self.total_updates
+            stat.tags['total_deletes'] = self.total_deletes
+            return stat
+
     # WIP: config the indexer on the fly
     # @requests(on='/config')
     def config(self, parameters: Dict, **kwargs):
@@ -261,6 +282,15 @@ class FaissIndexer(Executor):
             )
         else:
             indexer = faiss.index_factory(num_dim, index_key, metric_type)
+
+        # # Set verbosity level
+        # indexer.verbose = self.verbose
+        # if hasattr(indexer, "index") and indexer.index is not None:
+        #     indexer.verbose = self.verbose
+        # if hasattr(indexer, "quantizer") and indexer.quantizer is not None:
+        #     indexer.quantizer.verbose = self.verbose
+        # if hasattr(indexer, "clustering_index") and indexer.clustering_index is not None:
+        #     indexer.clustering_index.verbose = self.verbose
         return indexer
 
     def _build_indexer(self, indexer, **kwargs):
@@ -297,7 +327,7 @@ class FaissIndexer(Executor):
         if self.metric == 'cosine':
             faiss.normalize_L2(embeddings)
 
-        total_indexes = self.total_indexes
+        total_indexes = indexer.ntotal
         for idx, doc_id in zip(range(total_indexes, total_indexes + num_docs), doc_ids):
             self._metas['doc_ids'].append(doc_id)
             self._metas['delete_marks'].append(0)
@@ -350,12 +380,7 @@ class FaissIndexer(Executor):
     @property
     def metric_type(self):
         metric_type = faiss.METRIC_L2
-        if self.metric == 'inner_product':
-            self.logger.warning(
-                'inner_product will be output as distance instead of similarity.'
-            )
-            metric_type = faiss.METRIC_INNER_PRODUCT
-        elif self.metric == 'cosine':
+        if self.metric == 'cosine':
             self.logger.warning(
                 'cosine distance will be output as normalized inner_product distance.'
             )

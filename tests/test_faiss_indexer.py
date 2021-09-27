@@ -128,6 +128,21 @@ def test_update(tmpdir, docs, update_docs):
     search_docs[0].matches[0].id == f'doc1'
 
 
+def test_clear(tmpdir, docs, update_docs):
+    metas = {'workspace': str(tmpdir)}
+
+    # index docs first
+    indexer = FaissIndexer(metas=metas)
+    indexer.index(docs)
+
+    indexer.clear()
+    assert indexer.total_indexes == 0
+    assert indexer.total_deletes == 0
+    assert indexer.total_updates == 0
+
+    assert indexer.status().tags['env_stat']['entries'] == 0
+
+
 @pytest.mark.parametrize('metric', ['euclidean', 'cosine'])
 def test_search(tmpdir, metric, docs):
     metas = {'workspace': str(tmpdir)}
