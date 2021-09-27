@@ -100,7 +100,7 @@ class FaissIndexer(Executor):
         if docs is None:
             return
 
-        sync_index = parameters.get('sync_index', True) if parameters else True
+        sync = parameters.get('sync', True) if parameters else True
 
         updated_docs = DocumentArray()
 
@@ -121,7 +121,7 @@ class FaissIndexer(Executor):
                     # TODO: use hash to identify fake updates
                     updated_docs.append(doc)
 
-            if sync_index:
+            if sync:
                 self._vec_indexer = self._add_vecs_with_ids(
                     self._vec_indexer, embeddings, doc_ids
                 )
@@ -135,12 +135,23 @@ class FaissIndexer(Executor):
             return
 
         if self._vec_indexer is None:
+            self.logger.warning(f'The indexer has not been initialized!')
+            return
+
+        if not self._vec_indexer.is_trained:
+            self.logger.warning(f'The indexer need to be trained!')
             return
 
         embeddings = docs.embeddings.astype(np.float32)
 
         if self.metric == 'cosine':
             faiss.normalize_L2(embeddings)
+
+        if self.total_deletes > 100:
+            self.logger.warning(
+                f'There are {self.total_deletes} (> 100) documents are deleted, '
+                'which will degrade the search performance'
+            )
 
         expand_top_k = 2 * top_k + self.total_deletes
 
@@ -189,6 +200,7 @@ class FaissIndexer(Executor):
 
         with self._kv_storage_env.begin(write=True) as txn:
             for doc in docs:
+                doc.embedding = doc.embedding.astype(np.float32)
                 value = txn.replace(doc.id.encode(), doc.SerializeToString())
                 if not value:
                     raise ValueError(f'The Doc ({doc.id}) does not exist in database!')
@@ -216,12 +228,21 @@ class FaissIndexer(Executor):
                         f'Can not delete no-existed Doc ({doc_id}) from {self.__module__.__class__.__name__}'
                     )
 
+    @requests(on='/sync')
+    def sync(self, **kwargs):
+        if self._vec_indexer:
+            self._vec_indexer.reset()
+        self._metas = {'doc_ids': [], 'doc_id_to_offset': {}, 'delete_marks': []}
+        self._vec_indexer = self._build_indexer(self._vec_indexer)
+        self._buffer_indexer.clear()
+
     @requests(on='/clear')
     def clear(self, **kwargs):
         with self._kv_storage_env.begin(write=True) as txn:
             txn.drop(self._kv_storage_env.open_db(txn=txn), delete=False)
         if self._vec_indexer:
             self._vec_indexer.reset()
+        self._buffer_indexer.clear()
         self._metas = {'doc_ids': [], 'doc_id_to_offset': {}, 'delete_marks': []}
 
     @requests(on='/status')
@@ -233,7 +254,7 @@ class FaissIndexer(Executor):
             stat.tags['total_deletes'] = self.total_deletes
             return stat
 
-    # WIP: config the indexer on the fly
+    # WIP: rebuild the indexer with new settings on the fly
     # @requests(on='/config')
     def config(self, parameters: Dict, **kwargs):
         self.index_key = parameters.get('index_key', self.index_key)
@@ -324,6 +345,12 @@ class FaissIndexer(Executor):
                 **self._index_kwargs,
             )
 
+        if not indexer.is_trained:
+            self.logger.warning(
+                f'The new documents will not be indexed, as the indexer need to been trained'
+            )
+            return indexer
+
         if self.metric == 'cosine':
             faiss.normalize_L2(embeddings)
 
@@ -341,6 +368,7 @@ class FaissIndexer(Executor):
         docs = DocumentArray()
         with self._kv_storage_env.begin(write=False) as txn:
             cursor = txn.cursor()
+            # cursor.first()
             cursor.iternext()
             iterator = cursor.iternext(keys=True, values=True)
 

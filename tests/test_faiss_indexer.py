@@ -128,6 +128,31 @@ def test_update(tmpdir, docs, update_docs):
     search_docs[0].matches[0].id == f'doc1'
 
 
+def test_sync(tmpdir, docs, update_docs):
+    metas = {'workspace': str(tmpdir)}
+
+    # index docs first
+    indexer = FaissIndexer(metas=metas)
+    indexer.index(docs)
+
+    # update first doc
+    indexer.update(update_docs)
+
+    print(f'===> LLLLL')
+
+    indexer.sync()
+
+    assert indexer.total_indexes == 6
+    assert indexer.total_deletes == 0
+    assert indexer.total_updates == 0
+    assert len(indexer._buffer_indexer) == 0
+    assert (indexer.get_doc(f'doc1').embedding == [0, 0, 0, 1]).all()
+
+    search_docs = deepcopy(update_docs)
+    indexer.search(search_docs)
+    search_docs[0].matches[0].id == f'doc1'
+
+
 def test_clear(tmpdir, docs, update_docs):
     metas = {'workspace': str(tmpdir)}
 
