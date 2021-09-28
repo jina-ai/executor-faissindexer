@@ -165,7 +165,7 @@ def test_clear(tmpdir, docs, update_docs):
     assert indexer.total_deletes == 0
     assert indexer.total_updates == 0
 
-    assert indexer.status().tags['env_stat']['entries'] == 0
+    assert indexer.status().tags['db_stat']['entries'] == 0
 
 
 @pytest.mark.parametrize('metric', ['euclidean', 'cosine'])

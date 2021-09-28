@@ -6,9 +6,10 @@ from pathlib import Path
 from typing import Optional, Dict, List, Union
 import os
 import faiss
-import lmdb
 import numpy as np
 from jina import Document, Executor, DocumentArray, requests
+
+from .storage import StorageFactory
 
 
 class FaissIndexer(Executor):
@@ -20,6 +21,7 @@ class FaissIndexer(Executor):
 
     def __init__(
         self,
+        storage_backend: str = 'lmdb',
         index_key: str = 'Flat',
         metric: str = 'cosine',
         trained_index_file: Optional[str] = None,
@@ -27,6 +29,7 @@ class FaissIndexer(Executor):
         **kwargs,
     ):
         """
+        :param storage_backend: the storage backend, e.g., ``LMDB``, ``postgresql+psycopg2://``
         :param index_key: create a new FAISS index of the specified type.
                 The type is determined from the given string following the conventions
                 of the original FAISS index factory.
@@ -54,25 +57,8 @@ class FaissIndexer(Executor):
 
         self._metas = {'doc_ids': [], 'doc_id_to_offset': {}, 'delete_marks': []}
 
-        # the kv_storage is the storage backend for documents
-        self._kv_storage_env = lmdb.Environment(
-            storage_path,
-            map_size=int(3.436e10),  # in bytes, 32G,
-            subdir=False,
-            readonly=False,
-            metasync=True,
-            sync=True,
-            map_async=False,
-            mode=493,
-            create=True,
-            readahead=True,
-            writemap=False,
-            meminit=True,
-            max_readers=126,
-            max_dbs=0,  # means only one db
-            max_spare_txns=1,
-            lock=True,
-        )
+        # the kv_db is the storage backend for documents
+        self._kv_db = StorageFactory.open(storage_backend, db_path=storage_path)
 
         # the buffer_indexer is created for incremental updates
         self._buffer_indexer = DocumentArray()
@@ -97,36 +83,19 @@ class FaissIndexer(Executor):
         :param parameters: parameters to the request
         """
 
-        if docs is None:
+        if docs is None or len(docs) == 0:
             return
 
         sync = parameters.get('sync', True) if parameters else True
 
-        updated_docs = DocumentArray()
+        self._kv_db.put(docs)
 
-        embeddings = []
-        doc_ids = []
-
-        with self._kv_storage_env.begin(write=True) as txn:
-            for doc in docs:
-                # enforce using float32 as dtype of embeddings
-                doc.embedding = doc.embedding.astype(np.float32)
-                added = txn.put(
-                    doc.id.encode(), doc.SerializeToString(), overwrite=True
-                )
-                if added:
-                    embeddings.append(doc.embedding)
-                    doc_ids.append(doc.id)
-                else:
-                    # TODO: use hash to identify fake updates
-                    updated_docs.append(doc)
-
-            if sync:
-                self._vec_indexer = self._add_vecs_with_ids(
-                    self._vec_indexer, embeddings, doc_ids
-                )
-
-        self.update(updated_docs, parameters=parameters)
+        if sync:
+            doc_ids = docs.get_attributes('id')
+            embeddings = docs.embeddings
+            self._vec_indexer = self._add_vecs_with_ids(
+                self._vec_indexer, embeddings, doc_ids
+            )
 
     @requests(on='/search')
     def search(self, docs: DocumentArray, parameters: Optional[Dict] = None, **kwargs):
@@ -197,14 +166,8 @@ class FaissIndexer(Executor):
 
         if docs is None:
             return
-
-        with self._kv_storage_env.begin(write=True) as txn:
-            for doc in docs:
-                doc.embedding = doc.embedding.astype(np.float32)
-                value = txn.replace(doc.id.encode(), doc.SerializeToString())
-                if not value:
-                    raise ValueError(f'The Doc ({doc.id}) does not exist in database!')
-                self._buffer_indexer.append(doc)
+        self._kv_db.update(docs)
+        self._buffer_indexer.extend(docs)
 
     @requests(on='/delete')
     def delete(self, parameters: Dict, **kwargs):
@@ -212,21 +175,15 @@ class FaissIndexer(Executor):
         :param parameters: parameters to the request
         """
         deleted_ids = parameters.get('ids', [])
+        self._kv_db.delete(deleted_ids)
 
-        with self._kv_storage_env.begin(write=True) as txn:
-            for doc_id in deleted_ids:
-                deleted = txn.delete(doc_id.encode())
-                # delete from buffer_indexer
-                if deleted:
-                    idx = self._metas['doc_id_to_offset'][doc_id]
-                    self._metas['delete_marks'][idx] = 1
+        # delete from buffer_indexer
+        for doc_id in deleted_ids:
+            idx = self._metas['doc_id_to_offset'][doc_id]
+            self._metas['delete_marks'][idx] = 1
 
-                    if doc_id in self._buffer_indexer:
-                        del self._buffer_indexer[doc_id]
-                else:
-                    self.logger.warning(
-                        f'Can not delete no-existed Doc ({doc_id}) from {self.__module__.__class__.__name__}'
-                    )
+            if doc_id in self._buffer_indexer:
+                del self._buffer_indexer[doc_id]
 
     @requests(on='/sync')
     def sync(self, **kwargs):
@@ -238,8 +195,7 @@ class FaissIndexer(Executor):
 
     @requests(on='/clear')
     def clear(self, **kwargs):
-        with self._kv_storage_env.begin(write=True) as txn:
-            txn.drop(self._kv_storage_env.open_db(txn=txn), delete=False)
+        self._kv_db.clear()
         if self._vec_indexer:
             self._vec_indexer.reset()
         self._buffer_indexer.clear()
@@ -247,43 +203,14 @@ class FaissIndexer(Executor):
 
     @requests(on='/status')
     def status(self, **kwargs):
-        with self._kv_storage_env.begin(write=False) as txn:
-            stat = Document(tags={'env_stat': txn.stat()})
-            stat.tags['total_indexes'] = self.total_indexes
-            stat.tags['total_updates'] = self.total_updates
-            stat.tags['total_deletes'] = self.total_deletes
-            return stat
-
-    # WIP: rebuild the indexer with new settings on the fly
-    # @requests(on='/config')
-    def config(self, parameters: Dict, **kwargs):
-        self.index_key = parameters.get('index_key', self.index_key)
-        parameters.pop('index_key')
-        self.metric = parameters.get('metric', self.metric)
-        parameters.pop('metric')
-        num_dim = parameters.get('num_dim', self.num_dim)
-        parameters.pop('num_dim')
-
-        self._index_kwargs = parameters
-
-        buffer = self._init_indexer(
-            num_dim,
-            index_key=self.index_key,
-            metric_type=self.metric_type,
-            **parameters,
-        )
-
-        self._build_indexer(buffer, **parameters)
-
-        self._vec_indexer.reset()
-        self._vec_indexer = buffer
+        status = Document(tags={'db_stat': self._kv_db.stat})
+        status.tags['total_indexes'] = self.total_indexes
+        status.tags['total_updates'] = self.total_updates
+        status.tags['total_deletes'] = self.total_deletes
+        return status
 
     def get_doc(self, doc_id: str):
-        with self._kv_storage_env.begin(write=False) as txn:
-            buffer = txn.get(doc_id.encode())
-            if buffer:
-                return Document(buffer)
-            return None
+        return self._kv_db.get(doc_id)
 
     def _init_indexer(
         self,
@@ -315,8 +242,7 @@ class FaissIndexer(Executor):
         return indexer
 
     def _build_indexer(self, indexer, **kwargs):
-        docs_generator = self._docs_generator()
-        for docs in docs_generator:
+        for docs in self._kv_db.batched_iterator():
             doc_ids = docs.get_attributes('id')
             embeddings = docs.embeddings
             N, D = embeddings.shape
@@ -362,26 +288,6 @@ class FaissIndexer(Executor):
 
         indexer.add(embeddings)
         return indexer
-
-    def _docs_generator(self, batch_size: int = 1, **kwargs):
-        count = 0
-        docs = DocumentArray()
-        with self._kv_storage_env.begin(write=False) as txn:
-            cursor = txn.cursor()
-            # cursor.first()
-            cursor.iternext()
-            iterator = cursor.iternext(keys=True, values=True)
-
-            for _id, _data in iterator:
-                doc = Document(_data)
-                docs.append(doc)
-                count += 1
-                if count % batch_size == 0:
-                    yield docs
-                    docs.clear()
-
-            if len(docs) > 0:
-                yield docs
 
     @property
     def num_dim(self):
