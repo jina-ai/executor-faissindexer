@@ -58,6 +58,7 @@ class FaissIndexer(Executor):
         self._metas = {'doc_ids': [], 'doc_id_to_offset': {}, 'delete_marks': []}
 
         # the kv_db is the storage backend for documents
+        self.logger.info(f'Using "{storage_backend}" as the storage backend')
         self._kv_db = StorageFactory.open(storage_backend, db_path=storage_path)
 
         # the buffer_indexer is created for incremental updates
