@@ -165,8 +165,9 @@ class FaissIndexer(Executor):
         :param parameters: parameters to the request
         """
 
-        if docs is None:
+        if (docs is None) or len(docs) == 0:
             return
+
         self._kv_db.update(docs)
         self._buffer_indexer.extend(docs)
 
@@ -211,7 +212,10 @@ class FaissIndexer(Executor):
         return status
 
     def get_doc(self, doc_id: str):
-        return self._kv_db.get(doc_id)
+        docs = self._kv_db.get(doc_id)
+        if len(docs) == 0:
+            return None
+        return docs[0]
 
     def _init_indexer(
         self,

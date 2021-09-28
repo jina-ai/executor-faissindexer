@@ -1,5 +1,5 @@
 import lmdb
-from typing import List
+from typing import List, Union
 from jina import Document, DocumentArray
 import numpy as np
 from .base import Storage
@@ -51,12 +51,18 @@ class LMDBStorage(Storage):
             for doc_id in doc_ids:
                 txn.delete(doc_id.encode())
 
-    def get(self, doc_id: str):
+    def get(self, doc_ids: Union[str, list]) -> DocumentArray:
+        docs = DocumentArray()
+        if isinstance(doc_ids, str):
+            doc_ids = [doc_ids]
+
         with self._env.begin(write=False) as txn:
-            buffer = txn.get(doc_id.encode())
-            if buffer:
-                return Document(buffer)
-            return None
+            for doc_id in doc_ids:
+                buffer = txn.get(doc_id.encode())
+                if buffer:
+                    doc = Document(buffer)
+                    docs.append(doc)
+        return docs
 
     def clear(self):
         with self._env.begin(write=True) as txn:

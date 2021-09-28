@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Union
 from jina import Document, DocumentArray
 from jina.logging.logger import JinaLogger
 
@@ -37,16 +37,18 @@ class SQLStorage(Storage):
 
         self.logger = JinaLogger(self.__class__.__name__)
 
-    def get(self, doc_id: str) -> Document:
-        result = (
+    def get(self, doc_ids: Union[str, list]) -> DocumentArray:
+        if isinstance(doc_ids, str):
+            doc_ids = [doc_ids]
+        docs = DocumentArray()
+        for record in (
             self.session.query(DocumentModel)
-            .filter(DocumentModel.doc_id == doc_id)
+            .filter(DocumentModel.doc_id.in_(doc_ids))
             .all()
-        )
-        if len(result) == 0:
-            return None
-        else:
-            return Document(result[0].doc_data)
+        ):
+            doc = Document(record.doc_data)
+            docs.append(doc)
+        return docs
 
     def put(self, docs: DocumentArray):
         for doc in docs:
