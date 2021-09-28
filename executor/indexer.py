@@ -8,7 +8,7 @@ import os
 import faiss
 import numpy as np
 from jina import Document, Executor, DocumentArray, requests
-
+from jina.logging.logger import JinaLogger
 from .storage import StorageFactory
 
 
@@ -47,7 +47,7 @@ class FaissIndexer(Executor):
         :param trained_index_file: the index file dumped from a trained index, e.g., ``faiss.index``.
         """
         super().__init__(*args, **kwargs)
-        self.logger = logging.getLogger(self.__module__.__class__.__name__)
+        self.logger = JinaLogger(self.__class__.__name__)
 
         self.index_key = index_key
         self.metric = metric

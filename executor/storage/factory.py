@@ -5,7 +5,7 @@ from .sql import SQLStorage
 
 class StorageFactory:
     @staticmethod
-    def open(self, backend: str = 'lmdb', **kwargs):
+    def open(backend: str, **kwargs):
         if backend == 'lmdb':
             db_path = kwargs['db_path']
             kwargs.pop('db_path')

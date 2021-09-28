@@ -34,11 +34,7 @@ class DocumentModel(ORMBase):
 
 
 class SQLStorage(Storage):
-    def __init__(
-        self,
-        db_url: str,
-        table: str = 'document',
-    ):
+    def __init__(self, db_url: str, table: str = 'document', **kwargs):
         """An SQL backed DocumentStore. Currently supports SQLite, PostgreSQL and MySQL backends."""
         self.logger = logging.getLogger(self.__module__.__class__.__name__)
         DocumentModel.__tablename__ = table
@@ -67,7 +63,6 @@ class SQLStorage(Storage):
             self.session.commit()
         except Exception as ex:
             self.logger.error(f'Transaction rollback: {ex.__cause__}')
-            # Rollback is important here otherwise self.session will be in inconsistent state and next call will fail
             self.session.rollback()
             raise ex
 
@@ -80,7 +75,6 @@ class SQLStorage(Storage):
             self.session.commit()
         except Exception as ex:
             self.logger.error(f'Transaction rollback: {ex.__cause__}')
-            # Rollback is important here otherwise self.session will be in inconsistent state and next call will fail
             self.session.rollback()
             raise ex
 
