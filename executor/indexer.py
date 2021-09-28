@@ -13,9 +13,9 @@ from .storage import StorageFactory
 
 
 class FaissIndexer(Executor):
-    """A vector similarity indexer for very large scale data using Faiss and LMDB.
+    """A vector similarity indexer for very large scale data using Faiss.
 
-    The documents are stored using the LMDB, while the vector
+    The documents are stored using different storage backend, while the vector
     embeddings are indexed in a FAISS Index.
     """
 

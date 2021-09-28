@@ -67,6 +67,10 @@ class LMDBStorage(Storage):
         with self._env.begin(write=False) as txn:
             return txn.stat()
 
+    @property
+    def size(self):
+        return self.stat['entries']
+
     def batched_iterator(self, batch_size: int = 1, **kwargs):
         count = 0
         docs = DocumentArray()
