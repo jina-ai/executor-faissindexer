@@ -1,6 +1,6 @@
 # FaissIndexer
 
-A similarity search based on Faiss and LMDB
+A similarity search indexer based on Faiss.
 
 ## Usage
 

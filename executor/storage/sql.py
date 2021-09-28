@@ -8,13 +8,6 @@ from .base import Storage
 
 from sqlalchemy.orm import sessionmaker
 
-# from sqlalchemy.sql import case, null
-# from tqdm.auto import tqdm
-#
-# from modules.ml.constants import META_MAPPING
-# from modules.ml.document_store.base import BaseDocumentStore
-# from modules.ml.schema import Document
-
 
 Base = declarative_base()  # type: Any
 
