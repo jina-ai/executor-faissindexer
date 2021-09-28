@@ -7,6 +7,8 @@ from typing import Optional, Dict, List, Union
 import os
 import faiss
 import numpy as np
+from bloom_filter2 import BloomFilter
+
 from jina import Document, Executor, DocumentArray, requests
 from jina.logging.logger import JinaLogger
 from .storage import StorageFactory
@@ -57,6 +59,10 @@ class FaissIndexer(Executor):
 
         self._metas = {'doc_ids': [], 'doc_id_to_offset': {}, 'delete_marks': []}
 
+        # max_elements is how many elements you expect the filter to hold.
+        # error_rate defines accuracy;
+        self._bloom = self._init_bloom()
+
         # the kv_db is the storage backend for documents
         self.logger.info(f'Using "{storage_backend}" as the storage backend')
         self._kv_db = StorageFactory.open(storage_backend, db_path=storage_path)
@@ -92,11 +98,15 @@ class FaissIndexer(Executor):
         self._kv_db.put(docs)
 
         if sync:
-            doc_ids = docs.get_attributes('id')
-            embeddings = docs.embeddings
-            self._vec_indexer = self._add_vecs_with_ids(
-                self._vec_indexer, embeddings, doc_ids
-            )
+            new_docs, exist_docs = self.bloom_filter(docs)
+            if len(new_docs) > 0:
+                doc_ids = new_docs.get_attributes('id')
+                embeddings = new_docs.embeddings
+                self._vec_indexer = self._add_vecs_with_ids(
+                    self._vec_indexer, embeddings, doc_ids
+                )
+            if len(exist_docs) > 0:
+                self.update(docs, parameters=parameters)
 
     @requests(on='/search')
     def search(self, docs: DocumentArray, parameters: Optional[Dict] = None, **kwargs):
@@ -169,7 +179,9 @@ class FaissIndexer(Executor):
             return
 
         self._kv_db.update(docs)
-        self._buffer_indexer.extend(docs)
+        sync = parameters.get('sync', True) if parameters else True
+        if sync:
+            self._buffer_indexer.extend(docs)
 
     @requests(on='/delete')
     def delete(self, parameters: Dict, **kwargs):
@@ -191,6 +203,7 @@ class FaissIndexer(Executor):
     def sync(self, **kwargs):
         if self._vec_indexer:
             self._vec_indexer.reset()
+        self._bloom = self._init_bloom()
         self._metas = {'doc_ids': [], 'doc_id_to_offset': {}, 'delete_marks': []}
         self._vec_indexer = self._build_indexer(self._vec_indexer)
         self._buffer_indexer.clear()
@@ -202,6 +215,7 @@ class FaissIndexer(Executor):
             self._vec_indexer.reset()
         self._buffer_indexer.clear()
         self._metas = {'doc_ids': [], 'doc_id_to_offset': {}, 'delete_marks': []}
+        self._bloom = self._init_bloom()
 
     @requests(on='/status')
     def status(self, **kwargs):
@@ -216,6 +230,9 @@ class FaissIndexer(Executor):
         if len(docs) == 0:
             return None
         return docs[0]
+
+    def _init_bloom(self):
+        return BloomFilter(max_elements=100000000, error_rate=0.01)
 
     def _init_indexer(
         self,
@@ -254,6 +271,7 @@ class FaissIndexer(Executor):
             assert len(doc_ids) == N
 
             indexer = self._add_vecs_with_ids(indexer, embeddings, doc_ids)
+            self.bloom_filter(docs)
         return indexer
 
     def _add_vecs_with_ids(
@@ -293,6 +311,17 @@ class FaissIndexer(Executor):
 
         indexer.add(embeddings)
         return indexer
+
+    def bloom_filter(self, docs: DocumentArray):
+        new_docs = DocumentArray()
+        exist_docs = DocumentArray()
+        for doc in docs:
+            if doc.id in self._bloom:
+                exist_docs.append(doc)
+            else:
+                new_docs.append(doc)
+                self._bloom.add(doc.id)
+        return new_docs, exist_docs
 
     @property
     def num_dim(self):
