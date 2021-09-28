@@ -137,9 +137,6 @@ def test_sync(tmpdir, docs, update_docs):
 
     # update first doc
     indexer.update(update_docs)
-
-    print(f'===> LLLLL')
-
     indexer.sync()
 
     assert indexer.total_indexes == 6
@@ -197,3 +194,46 @@ def test_search(tmpdir, metric, docs):
 
     # test search empty docs
     indexer.search(DocumentArray())
+
+
+def test_sql_backend(tmpdir, docs, update_docs):
+    metas = {'workspace': str(tmpdir)}
+    indexer = FaissIndexer(
+        storage_backend='sqlite:///:memory:', index_key='Flat', metas=metas
+    )
+    assert indexer.num_dim is None
+    assert indexer.total_indexes == 0
+    assert indexer.total_deletes == 0
+    assert indexer.total_updates == 0
+
+    indexer.index(docs)
+    assert indexer.num_dim == 4
+    assert indexer.total_indexes == 6
+    assert indexer.total_deletes == 0
+    assert indexer.total_updates == 0
+
+    # update first doc
+    indexer.update(update_docs)
+    assert indexer.total_indexes == 6
+    assert indexer.total_deletes == 0
+    assert indexer.total_updates == 1
+    assert (indexer._buffer_indexer[0].embedding == [0, 0, 0, 1]).all()
+    assert (indexer.get_doc(f'doc1').embedding == [0, 0, 0, 1]).all()
+
+    search_docs = deepcopy(update_docs)
+    indexer.search(search_docs)
+    search_docs[0].matches[0].id == f'doc1'
+
+    # update first doc
+    indexer.update(update_docs)
+    indexer.sync()
+
+    assert indexer.total_indexes == 6
+    assert indexer.total_deletes == 0
+    assert indexer.total_updates == 0
+    assert len(indexer._buffer_indexer) == 0
+    assert (indexer.get_doc(f'doc1').embedding == [0, 0, 0, 1]).all()
+
+    search_docs = deepcopy(update_docs)
+    indexer.search(search_docs)
+    search_docs[0].matches[0].id == f'doc1'

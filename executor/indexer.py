@@ -83,7 +83,7 @@ class FaissIndexer(Executor):
         :param parameters: parameters to the request
         """
 
-        if docs is None or len(docs) == 0:
+        if (docs is None) or len(docs) == 0:
             return
 
         sync = parameters.get('sync', True) if parameters else True
