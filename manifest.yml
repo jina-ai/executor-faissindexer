@@ -1,5 +1,0 @@
-manifest_version: 1
-name: FaissIndexer
-description: A similarity search based on Faiss and LMDB
-url: https://github.com/jina-ai/executor-faissindexer
-keywords: faiss lmdb ann
