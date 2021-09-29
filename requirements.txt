@@ -1,4 +1,5 @@
+bloom-filter2
 faiss-cpu==1.7.1
-jina
 lmdb==1.2.1
 numpy
+SQLAlchemy-Utils==0.37.8

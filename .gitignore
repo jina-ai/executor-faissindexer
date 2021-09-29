@@ -137,3 +137,5 @@ toy*.yml
 Cargo.lock
 
 toy*.py
+workspace
+.jina
