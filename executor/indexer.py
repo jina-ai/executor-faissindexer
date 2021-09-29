@@ -17,8 +17,8 @@ from .storage import StorageFactory
 class FaissIndexer(Executor):
     """A vector similarity indexer for very large scale data using Faiss.
 
-    The documents are stored using different storage backend, while the vector
-    embeddings are indexed in a FAISS Index.
+    The documents can be stored using different storage backend (e.g., LMDB, SQLite, PostgresSQL),
+    while the vector embeddings are indexed in a FAISS Index.
     """
 
     def __init__(
@@ -59,8 +59,6 @@ class FaissIndexer(Executor):
 
         self._metas = {'doc_ids': [], 'doc_id_to_offset': {}, 'delete_marks': []}
 
-        # max_elements is how many elements you expect the filter to hold.
-        # error_rate defines accuracy;
         self._bloom = self._init_bloom()
 
         # the kv_db is the storage backend for documents
@@ -201,6 +199,7 @@ class FaissIndexer(Executor):
 
     @requests(on='/sync')
     def sync(self, **kwargs):
+        """Sync the data from the storage into the Faiss index"""
         if self._vec_indexer:
             self._vec_indexer.reset()
         self._bloom = self._init_bloom()
@@ -210,6 +209,7 @@ class FaissIndexer(Executor):
 
     @requests(on='/clear')
     def clear(self, **kwargs):
+        """Completely clear the storage and index."""
         self._kv_db.clear()
         if self._vec_indexer:
             self._vec_indexer.reset()
@@ -219,6 +219,7 @@ class FaissIndexer(Executor):
 
     @requests(on='/status')
     def status(self, **kwargs):
+        """Return the status of the indexer."""
         status = Document(tags={'db_stat': self._kv_db.stat})
         status.tags['total_indexes'] = self.total_indexes
         status.tags['total_updates'] = self.total_updates
@@ -232,6 +233,8 @@ class FaissIndexer(Executor):
         return docs[0]
 
     def _init_bloom(self):
+        # max_elements (100M) is how many elements you expect the filter to hold.
+        # error_rate defines accuracy;
         return BloomFilter(max_elements=100000000, error_rate=0.01)
 
     def _init_indexer(
@@ -271,7 +274,7 @@ class FaissIndexer(Executor):
             assert len(doc_ids) == N
 
             indexer = self._add_vecs_with_ids(indexer, embeddings, doc_ids)
-            self.bloom_filter(docs)
+            self.append_bloom(docs)
         return indexer
 
     def _add_vecs_with_ids(
@@ -320,8 +323,11 @@ class FaissIndexer(Executor):
                 exist_docs.append(doc)
             else:
                 new_docs.append(doc)
-                self._bloom.add(doc.id)
         return new_docs, exist_docs
+
+    def append_bloom(self, docs: DocumentArray):
+        for doc in docs:
+            self._bloom.add(doc.id)
 
     @property
     def num_dim(self):
