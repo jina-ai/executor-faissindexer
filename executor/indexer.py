@@ -1,16 +1,16 @@
-import logging
-from copy import deepcopy
-
-from collections import OrderedDict
-from pathlib import Path
-from typing import Optional, Dict, List, Union
 import os
+from collections import OrderedDict
+from copy import deepcopy
+from pathlib import Path
+from typing import Dict, List, Optional, Union
+
 import faiss
 import numpy as np
+from bidict import bidict
 from bloom_filter2 import BloomFilter
-
-from jina import Document, Executor, DocumentArray, requests
+from jina import Document, DocumentArray, Executor, requests
 from jina.logging.logger import JinaLogger
+
 from .storage import StorageFactory
 
 
@@ -57,7 +57,7 @@ class FaissIndexer(Executor):
         workspace = Path(self.workspace)
         storage_path = str(workspace / 'lmdb_docs')
 
-        self._metas = {'doc_ids': [], 'doc_id_to_offset': {}, 'delete_marks': []}
+        self._metas = {'doc_id_to_offset': bidict(), 'delete_marks': []}
 
         self._bloom = self._init_bloom()
 
@@ -148,7 +148,7 @@ class FaissIndexer(Executor):
                 idx, dist = m_info
                 if idx < 0 or self._metas['delete_marks'][idx]:
                     continue
-                match_doc_id = self._metas['doc_ids'][idx]
+                match_doc_id = self._metas['doc_id_to_offset'].inverse[idx]
                 match = self.get_doc(match_doc_id)
                 match.scores[self.metric] = dist
 
@@ -203,7 +203,7 @@ class FaissIndexer(Executor):
         if self._vec_indexer:
             self._vec_indexer.reset()
         self._bloom = self._init_bloom()
-        self._metas = {'doc_ids': [], 'doc_id_to_offset': {}, 'delete_marks': []}
+        self._metas = {'doc_id_to_offset': bidict(), 'delete_marks': []}
         self._vec_indexer = self._build_indexer(self._vec_indexer)
         self._buffer_indexer.clear()
 
@@ -214,7 +214,7 @@ class FaissIndexer(Executor):
         if self._vec_indexer:
             self._vec_indexer.reset()
         self._buffer_indexer.clear()
-        self._metas = {'doc_ids': [], 'doc_id_to_offset': {}, 'delete_marks': []}
+        self._metas = {'doc_id_to_offset': bidict(), 'delete_marks': []}
         self._bloom = self._init_bloom()
 
     @requests(on='/status')
@@ -251,7 +251,8 @@ class FaissIndexer(Executor):
             indexer.hnsw.efSearch = kwargs.get('efSearch', 20)  # 20
             indexer.hnsw.efConstruction = kwargs.get('efConstruction', 80)  # 80
             self.logger.info(
-                f'HNSW params: n_links: {n_links}, efSearch: {indexer.hnsw.efSearch}, efConstruction: {indexer.hnsw.efConstruction}'
+                f'HNSW params: n_links: {n_links}, efSearch: {indexer.hnsw.efSearch},'
+                f' efConstruction: {indexer.hnsw.efConstruction}'
             )
         else:
             indexer = faiss.index_factory(num_dim, index_key, metric_type)
@@ -299,7 +300,8 @@ class FaissIndexer(Executor):
 
         if not indexer.is_trained:
             self.logger.warning(
-                f'The new documents will not be indexed, as the indexer need to been trained'
+                'The new documents will not be indexed, as the indexer need to been'
+                ' trained'
             )
             return indexer
 
@@ -308,7 +310,6 @@ class FaissIndexer(Executor):
 
         total_indexes = indexer.ntotal
         for idx, doc_id in zip(range(total_indexes, total_indexes + num_docs), doc_ids):
-            self._metas['doc_ids'].append(doc_id)
             self._metas['delete_marks'].append(0)
             self._metas['doc_id_to_offset'][doc_id] = idx
 
