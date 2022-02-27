@@ -9,6 +9,7 @@ import numpy as np
 from bidict import bidict
 from bloom_filter2 import BloomFilter
 from jina import Document, DocumentArray, Executor, requests
+from docarray.score import NamedScore
 from jina.logging.logger import JinaLogger
 
 from .storage import StorageFactory
@@ -98,7 +99,7 @@ class FaissIndexer(Executor):
         if sync:
             new_docs, exist_docs = self.bloom_filter(docs)
             if len(new_docs) > 0:
-                doc_ids = new_docs.get_attributes('id')
+                doc_ids = new_docs[:, 'id']
                 embeddings = new_docs.embeddings
                 self._vec_indexer = self._add_vecs_with_ids(
                     self._vec_indexer, embeddings, doc_ids
@@ -150,14 +151,15 @@ class FaissIndexer(Executor):
                     continue
                 match_doc_id = self._metas['doc_id_to_offset'].inverse[idx]
                 match = self.get_doc(match_doc_id)
-                match.scores[self.metric] = dist
-
+                s = NamedScore()
+                s.value = dist
+                s.ref_id = docs[0].id
+                match.scores[self.metric] = s
                 matched_docs[match.id] = match
 
             # merge search results
             for m in buffer_matched_docs:
                 matched_docs[m.id] = m
-
             docs[doc_idx].matches = [
                 m
                 for _, m in sorted(
@@ -166,12 +168,14 @@ class FaissIndexer(Executor):
                 )
             ][:top_k]
 
+
     @requests(on='/update')
     def update(self, docs: DocumentArray, parameters: Optional[Dict] = None, **kwargs):
-        """Update entries from the index by id
+        """Update entries from the index by id.
         :param docs: the documents to update
         :param parameters: parameters to the request
         """
+
 
         if (docs is None) or len(docs) == 0:
             return
@@ -269,7 +273,7 @@ class FaissIndexer(Executor):
 
     def _build_indexer(self, indexer, **kwargs):
         for docs in self._kv_db.batched_iterator():
-            doc_ids = docs.get_attributes('id')
+            doc_ids = docs[:,'id']
             embeddings = docs.embeddings
             N, D = embeddings.shape
             assert len(doc_ids) == N
