@@ -46,14 +46,14 @@ class SQLStorage(Storage):
             .filter(DocumentModel.doc_id.in_(doc_ids))
             .all()
         ):
-            doc = Document(record.doc_data)
+            doc = Document.from_bytes(record.doc_data)
             docs.append(doc)
         return docs
 
     def put(self, docs: DocumentArray):
         for doc in docs:
             doc.embedding = doc.embedding.astype(np.float32)
-            record = DocumentModel(doc_id=doc.id, doc_data=doc.SerializeToString())
+            record = DocumentModel(doc_id=doc.id, doc_data=doc.to_bytes())
             self.session.merge(record)
         try:
             self.session.commit()
@@ -66,7 +66,7 @@ class SQLStorage(Storage):
     def update(self, docs: DocumentArray):
         for doc in docs:
             doc.embedding = doc.embedding.astype(np.float32)
-            record = DocumentModel(doc_id=doc.id, doc_data=doc.SerializeToString())
+            record = DocumentModel(doc_id=doc.id, doc_data=doc.to_bytes())
             self.session.merge(record)
         try:
             self.session.commit()
@@ -93,7 +93,7 @@ class SQLStorage(Storage):
         for record in (
             self.session.query(DocumentModel).yield_per(1).enable_eagerloads(False)
         ):
-            docs.append(Document(record.doc_data))
+            docs.append(Document.from_bytes(record.doc_data))
             count += 1
             if count % batch_size == 0:
                 yield docs
